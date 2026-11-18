@@ -1,0 +1,11 @@
+# 运行时生成的队列/心跳/日志
+tmp/
+*.log
+
+# Python
+__pycache__/
+*.pyc
+
+# Windows
+Thumbs.db
+desktop.ini
