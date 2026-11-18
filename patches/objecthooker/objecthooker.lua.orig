@@ -1,0 +1,736 @@
+-- DAHM by DorentuZ` -- http://steamcommunity.com/id/dorentuz/
+--
+-- This Source Code Form is subject to the terms of the Mozilla Public
+-- License, v. 2.0. If a copy of the MPL was not distributed with this
+-- file, You can obtain one at http://mozilla.org/MPL/2.0/.
+
+local debug_lvl = 0
+-- D:hook("OnCommand", "debug_object_hooker", function(args)
+-- 	if args == "reload" then
+-- 		D._object_hooker:setup()
+-- 		return
+-- 	end
+-- 	D._object_hooker:set_debug((args ~= "false" and args ~= "off") and (tonumber(args) or 3) or 0)
+-- end)
+
+local sft, shi, sd = {}, {}, 0
+local MAX_FRAMES = 256
+local rpool, rd = {}, 0
+local function pack_into(t, ...)
+	local n = select("#", ...)
+	for i = 1, n do t[i] = (select(i, ...)) end
+	t.n = n
+	return t
+end
+local function release(t, ...)
+	for i = 1, t.n do t[i] = nil end
+	rd = rd - 1
+	return ...
+end
+local function pop(d, ...)
+	sd = d
+	return ...
+end
+local log_functions_whitelist, log_functions_blacklist
+
+local D = ...
+local FN_ORIG, FN_CURR, FN_RETN, REPLACE_HOOK, PRE_HOOK, POST_HOOK = 1, 2, 3, 4, 5, 6
+local DObjectHooker = rawget(_G, "DObjectHooker") or {
+	_instance_hooks = false,     -- disable instance hooking (legacy use only)
+	_old_instance_hooks = false, -- disable instance hooking (legacy use only)
+	_class_hooks = {}, _module_hooks = {}, _object_hooks = {},
+	_log_calls = D:conf("debug_hook_call_orig_logging"),
+	hook_types = {
+		before = PRE_HOOK,
+		replace = REPLACE_HOOK,
+		after = POST_HOOK,
+		--
+		MIN = REPLACE_HOOK,
+		MAX = POST_HOOK
+	},
+}
+
+-- get instance from table (possibly check metatable when instance is used instead of the "class")
+local _get_ot ; _get_ot = function(ht, obj, ci)
+	if ht == nil then
+		return
+	end
+	local ot = ht[obj]
+	if ot ~= nil then
+		return ot
+	end
+	if ci then
+		return _get_ot(ht, getmetatable(obj), false)
+	end
+end
+
+function DObjectHooker:log(level, ...)
+	return D:_log(level, ...)
+end
+
+function DObjectHooker:setup()
+	if not D:conf("debug_hook_call_blacklist") and not D:conf("debug_hook_call_whitelist") then
+		D:set_config_option("debug_hook_call_blacklist", {
+			module = { ["interact_toggle"] = 1 },
+			fname = { ["update"] = 1, ["paused_update"] = 1, ["update_timers"] = 1, ["input_multi_choice"] = 1, ["input_kitslot"] = 1, ["input_text"] = 1 },
+			class = { ["LocalizationManager"] = 1, ["hud:StatisticsManager"] = 1 },
+			class_fn = { ["HUDManager._update_name_labels"] = 1, ["HUDManager.update_hud_text"] = 1 },
+			event = { ["MenuUpdate"] = 1, ["GameSetupUpdate"] = 1, ["GameSetupPausedUpdate"] = 1 },
+			event_hook = nil -- { ["MenuUpdate:my_hook_id"] = 1 },
+		})
+	end
+
+	log_functions_whitelist = D:conf("debug_hook_call_whitelist")
+	log_functions_blacklist = D:conf("debug_hook_call_blacklist")
+end
+
+-- function DObjectHooker:set_debug(lvl)
+-- 	debug_lvl = lvl and (tonumber(lvl) or 1) or 0
+-- end
+
+function DObjectHooker:_state_dump(module, obj, fname, cid, ot)
+	dlog("> state dump for", module, tostring(self:get_class_name(module, obj)) .. ":" .. tostring(fname), cid, ot)
+	if self._object_hooks then dump_table(_get_ot(self._object_hooks, obj, self._instance_hooks), 0) else dlog("false") end
+	if ot ~= nil then
+		dump_table(ot, 3)
+	end
+end
+
+function DObjectHooker:hook_class_obj(module, env, classname, default, ...)
+	local c
+	if type(classname) == "string" then
+		c = rawget(env, classname)
+	elseif type(classname) == "table" then
+		-- look through modules
+		c = classname
+
+		if type(default) == "string" then
+			classname = default
+			default = nil -- we have an instance, don't create another one
+		else
+			if core.__obj2nametable[c] == nil then
+				local function find(o, n, t)
+					for k, v in pairs(t) do
+						if v == o then
+							core.__obj2nametable[o] = {k, n}
+							return true
+						end
+					end
+				end
+				find(c, "_G", _G)
+				for n, m in pairs(core.__modules) do
+					find(c, n, m)
+				end
+			end
+			classname = core.__obj2nametable[c] ~= nil and core.__obj2nametable[c][1] or "<unknown" .. tostring(c) .. ">"
+		end
+	else
+		-- bad call
+		Application:error("Bad call to DObjectHooker:hook_class_obj: cannot handle a class of type", type(classname))
+		return
+	end
+
+	if c == nil then
+		if default ~= nil then
+			self:log(4, "DObjectHooker:hook_class_obj", "creating new class instance for", classname)
+			c = type(default) == "function" and default(...) or default
+			rawset(env, classname, c)
+		else
+			-- no class nor a default
+			Application:error("Class " .. tostring(classname) .. " not found and a new instance cannot be created.")
+			return
+		end
+	end
+
+	local set_classname = false --not rawget(c, "__name")
+	if self._class_hooks[c] == nil then
+		if not set_classname then
+			set_classname = not default and ...
+		end
+		self._class_hooks[c] = classname
+	end
+
+	if set_classname then
+		c.__name = classname
+	end
+
+	local h = self._module_hooks[module]
+	if h == nil then
+		h = {} ; self._module_hooks[module] = h
+	end
+
+	self._module_hooks[module] = h
+	table.insert(h, c)
+
+	return c
+end
+
+function DObjectHooker:reset_call_frames()
+	sd, rd = 0, 0
+end
+
+function DObjectHooker:_make_caller(ft, entry)
+	local func = entry[1]
+	entry[5] = function(...)
+		local d = sd + 1
+		if d > MAX_FRAMES then
+			DObjectHooker:log(0, "DObjectHooker:caller", "WARNING: too many nested hook calls, resetting the call frame stack")
+			d = 1
+		end
+		sd, sft[d], shi[d] = d, ft, entry[6]
+		return pop(d - 1, func(...))
+	end
+end
+
+function DObjectHooker:_reindex(tt)
+	for k in pairs(tt) do
+		if type(k) == "table" then
+			tt[k] = nil
+		end
+	end
+
+	for j = 1, #tt do
+		local e = tt[j]
+		e[6] = j
+		local module = e[2]
+		if module ~= nil then
+			local ee = tt[module]
+			if ee == nil then
+				tt[module] = j
+			else
+				if type(ee) ~= "table" then
+					local first_id = tt[ee][4]
+					ee = { [first_id == nil and 1 or first_id] = ee }
+					tt[module] = ee
+				end
+
+				local id = e[4]
+				if id == nil then
+					id = 1
+					while ee[id] ~= nil do id = id + 1 end
+				end
+				ee[id] = j
+			end
+		end
+	end
+end
+
+function DObjectHooker:add_hook(module, hook_type, obj, fname, log_calls, func, has_ret, custom_id)
+	if type(func) == "string" then
+		-- first arg is id
+		func, has_ret, custom_id = has_ret, custom_id, func
+	end
+
+	local orig = obj[fname]
+	-- if debug_lvl >= 1 then
+	-- 	dlog("> hooking:", module, hook_type, obj, fname, custom_id, "orig:",orig, "newf:",func, "ht:", self.g_hooks, self._object_hooks)
+	-- end
+
+	local patch_obj = false
+	if log_calls then
+		log_calls = self:_should_log_calls(
+			module, log_functions_whitelist or log_functions_blacklist, log_functions_whitelist, self:get_class_name(module, obj), fname
+		)
+	elseif debug_lvl >= 1 then
+		log_calls = true
+	end
+
+	local ht, ft, ot = self._object_hooks, nil, nil
+	if ht == nil then
+		ht = {} ; self._object_hooks = ht
+	end
+	ot = ht[obj]
+
+	if ot == nil then
+		-- dlog("> new ot", ft)
+		ot = {} ; ht[obj] = ot
+	end
+
+	ft = ot[fname]
+	if ft == nil or ft[2] ~= orig then
+		if ft ~= nil then
+			self:log(4, "DObjectHooker:add_hook", string.format(
+				"function %s:%s was replaced outside of the hooker, wrapping the new function",
+				tostring(self:get_class_name(module, obj)), fname
+			))
+		end
+		ft = { false, false, false, false } ; ot[fname] = ft -- pre-allocate some memory
+		patch_obj = true
+	end
+
+	-- type
+	local tt = ft[hook_type]
+	if not tt then
+		tt = {}; ft[hook_type] = tt
+	end
+
+	if has_ret ~= false and ft[3] ~= true then -- FN_RETN
+		ft[3] = true
+	end
+
+	local i = #tt
+
+	local entry = { func, module, log_calls, custom_id }
+	tt[i + 1] = entry
+	if hook_type == REPLACE_HOOK then
+		self:_make_caller(ft, entry)
+	end
+	self:_reindex(tt)
+
+	-- if debug_lvl >= 2 then
+	-- 	dlog("> hook added")
+	-- 	self:_state_dump(module, obj, fname, custom_id, nil)
+	-- end
+
+	-- patch function
+	if patch_obj == true then
+		-- if debug_lvl >= 2 then
+		-- 	dlog(">> patching object function. old:", obj[fname])
+		-- end
+
+		self:_patch_object_function(ft, obj, fname, tablex.get(module:active_script_override(), 1))
+
+		-- if debug_lvl >= 2 then
+		-- 	dlog(">> patch result:", obj[fname], "was:", ft[1], "/", ft[2])
+		-- end
+		return ft[1] -- wrapper orig
+	end
+
+	if hook_type == 4 and i > 0 then -- REPLACE_HOOK
+		local previous = tt[i]
+		return previous[5] or previous[1] -- previously hooked fn (through its caller, so that it can use call_orig as well)
+	end
+	return ft[1] -- wrapper orig
+end
+
+function DObjectHooker:unhook(module, obj, fname, custom_id)
+	local ht = self._object_hooks
+	if ht == nil then
+		return false
+	end
+
+	ht = ht[obj] -- ot
+	if ht == nil then
+		return false
+	end
+
+	ht = ht[fname] -- ft
+	if ht == nil then
+		return false
+	end
+
+	local result = {}
+	for hti = self.hook_types.MIN, self.hook_types.MAX do
+		local tt = ht[hti]
+		if tt and tt[module] ~= nil then
+			for i = 1, #tt do
+				local e = tt[i]
+				if e[2] == module and e[4] == custom_id then -- module, custom_id
+					result[hti] = table.remove(tt, i)
+					self:_reindex(tt)
+
+					if hti == REPLACE_HOOK then
+						local info = debug.getinfo(3, "Sl")
+						self:log(0, "DObjectHooker:unhook", string.format(
+							"WARNING: unsafe removal of replacement hook %s:%s for %s at %s",
+							tostring(self:get_class_name(module, obj)), fname,
+							custom_id and module:id() .. ":" .. custom_id or module:id(),
+							info and (info.source .. ":" .. info.currentline)
+						))
+					end
+					break
+				end
+			end
+		end
+	end
+
+	return not tablex.empty(result) and result
+end
+
+function DObjectHooker:get_hook_of_type(module, hook_type, obj, fname, custom_id)
+	local h = self._object_hooks
+	if h == nil then
+		return false
+	end
+
+	h = h[obj]
+	if h == nil then
+		return false
+	end
+
+	h = h[fname]
+	if h == nil then
+		return false
+	end
+
+	h = h[hook_type]
+	if not h then
+		return false
+	end
+
+	-- special case: all mod hooks of type
+	if module == nil then
+		return h
+	end
+
+	local hi = h[module]
+	if hi == nil then
+		return false
+	end
+
+	if type(hi) == "table" then
+		hi = hi[custom_id]
+		if hi == nil then
+			return false
+		end
+	end
+
+	return h[hi], hi
+end
+
+function DObjectHooker:get_original_s(module, obj, fname, custom_id, use_current, raw_fallback)
+	if obj == nil or fname == nil then
+		return
+	end
+
+	if self._old_instance_hooks == true then
+		local instance_fn = rawget(obj, "__dh_" .. module:id() .. "_" .. fname .. (custom_id and "_" .. custom_id or ""))
+		if instance_fn ~= nil then
+			self:log(2, "DObjectHooker:get_original_s", "WARNING: returning instance function:",
+				"__dh_" .. module:id() .. "_" .. fname .. (custom_id and "_" .. custom_id or ""), self:get_class_name(module, obj)
+			)
+			return instance_fn, nil
+		end
+	end
+
+	while true do -- hacky goto emulation with breaks
+		local ht = self._object_hooks
+		local ot = ht and ht[obj]
+		if ot == nil and self._instance_hooks then
+			ot = _get_ot(ht, obj, true) -- only needed when the instance is looked up instead of the class
+		end
+		if ot == nil then
+			break -- class not hooked
+		end
+
+		local ft = ot[fname]
+		if ft == nil then
+			break -- class has no such function
+		end
+
+		-- tt = hooks table for current type
+		local tt = ft[4] -- REPLACE_HOOK
+		if not tt then
+			if use_current ~= false then
+				return ft[1], nil
+			end
+			break
+		end
+
+		for d = sd, 1, -1 do
+			if sft[d] == ft then
+				local hi = shi[d]
+				if hi > 1 then
+					local h = tt[hi - 1]
+					return h[5] or h[1], tt, hi - 1, ft
+				end
+				return ft[1], nil -- FN_ORIG
+			end
+		end
+
+		-- hi = index for this modules orig method for this function
+		local hi = tt[module]
+		if hi == nil then
+			self:_state_dump(module, obj, fname, custom_id, ot)
+			error(string.format("No original function hook for %s:%s for unhooked module %s",
+				tostring(self:get_class_name(module, obj)), tostring(fname), module:id()), 3
+			)
+		end
+
+		-- named hooks?
+		if type(hi) == "table" then
+			local id = custom_id
+			if id == nil then id = 1 end -- first unnamed hook
+			hi = hi[id]
+			if hi == nil then
+				self:_state_dump(module, obj, fname, custom_id, ot)
+				error(string.format("No original function hook for %s:%s with id %s:%s",
+					tostring(self:get_class_name(module, obj)), tostring(fname), module:id(), tostring(custom_id)), 3
+				)
+			end
+		end
+
+		if hi > 1 then
+			local h = tt[hi - 1]
+			return h[5] or h[1], tt, hi - 1, ft -- func replacement set by h
+		end
+
+		return ft[1], nil -- FN_ORIG
+	end
+
+	if raw_fallback == true then
+		if obj[fname] ~= nil then
+			return obj[fname], false
+		end
+	end
+
+	local info = debug.getinfo(3, "Sl")
+	self:log(0, "DObjectHooker:get_original_s", string.format(
+		"WARNING: function %s:%s orig call is possibly incorrect for %s at %s",
+		tostring(self:get_class_name(module, obj)), fname,
+		custom_id and module:id() .. ":" .. custom_id or module:id(),
+		info and (info.source .. ":" .. info.currentline)
+	))
+end
+
+function DObjectHooker:has_original_s(module, obj, fname, custom_id, include_current, include_raw)
+	return self:get_original_s(module, obj, fname, custom_id, include_current, include_raw) ~= nil
+end
+
+function DObjectHooker:call_original_s(module, obj, fname, fallback_func, custom_id, ...)
+	local func, ht, hi = self:get_original_s(module, obj, fname, custom_id)
+
+	local h = ht and ht[hi]
+	if func ~= nil then
+		if h and h[3] then -- { func, module, > log_calls <, custom_id }
+			self:_log_call("DMod:hook call (3)", func, h[2], obj, fname, custom_id or false, ...)
+		end
+		return func(...)
+	elseif type(fallback_func) == "function" then
+		return fallback_func(...)
+	end
+end
+
+-- NOTE: this doesn't consider functions patched outside of the framework
+function DObjectHooker:_patch_object_function(ft, obj, fname, _script_path)
+
+	local script_path = _script_path or "?" -- _G.RequiredScript
+	-- if debug_lvl >= 1 then
+	--	dlog(">> patching function:", obj, fname, script_path, obj[fname])
+	-- 	dump_table(ft, 2)
+	-- end
+
+	-- store reference to the original
+	ft[1] = obj[fname]
+
+	-- create wrapper and store reference
+	ft[2] = function(...)
+		local ft, func_r = ft, nil -- use func_r for both the function reference and the result
+		-- if debug_lvl >= 2 then
+		-- 	dlog(">> patched function call:", self:get_class_name(nil, obj) or "?", fname, script_path, "<=", ...)
+		-- 	dump_table(ft, 2)
+		-- 	dump_table({ pre = { PRE_HOOK, ft[5] }, repl = { REPLACE_HOOK, ft[4] }, post = { POST_HOOK, ft[6] } }, 3)
+		-- end
+
+		-- pre hooks
+		if ft[5] ~= nil then -- PRE_HOOK
+			-- if debug_lvl >= 1 then
+			-- 	dlog("> pre_t is not nil")
+			-- end
+			for i = 1, #ft[5] do
+				local h = ft[5][i]
+
+				-- log call
+				if h[3] then -- log_enabled
+					self:_log_call("DMod:pre_hook call", h[1], h[2], obj, fname, ...)
+				end
+
+				-- make call
+				h[1](...)
+			end
+		end
+
+		local rt = ft[4] -- REPLACE_HOOK
+		if rt then
+			local h = rt[#rt] -- use last one; none left when unhooked
+			if h then
+				-- log call
+				if h[3] then -- log_enabled
+					self:_log_call("DMod:hook call (1)", h[1], h[2], obj, fname, ...)
+				end
+
+				-- replace the function to call
+				func_r = h[5] or h[1]
+			else
+				func_r = ft[1]
+			end
+		else
+			func_r = ft[1] -- original
+		end
+
+		-- call function
+		if func_r ~= nil then
+			-- if debug_lvl >= 1 then
+			-- 	dlog("> calling", fname, func_r, ...)
+			-- end
+
+			if ft[6] == nil --[[and debug_lvl < 3]] then -- POST_HOOK
+				-- if debug_lvl >= 2 then
+				-- 	dlog("> no post hooks; directly returning result")
+				-- end
+				return func_r(...)
+			end
+
+			if ft[3] ~= false then -- FN_RETN
+				rd = rd + 1
+				local rt = rpool[rd]
+				if rt == nil then rt = {} rpool[rd] = rt end
+				func_r = pack_into(rt, func_r(...))
+
+				-- if debug_lvl >= 3 then
+				-- 	dlog("> call result:", unpack(func_r, 1, func_r.n))
+				-- end
+			else
+				func_r(...)
+				func_r = nil
+
+				-- if debug_lvl >= 3 then
+				-- 	dlog("> no call result")
+				-- end
+			end
+		end
+
+		-- post hooks
+		if ft[6] ~= nil then -- POST_HOOK
+			-- if debug_lvl >= 1 then
+			-- 	dlog("> post_t is not nil")
+			-- end
+			for i = 1, #ft[6] do
+				local h = ft[6][i]
+
+				-- log call
+				if h[3] then -- log_enabled
+					self:_log_call("DMod:post_hook call", h[1], h[2], obj, fname, ...)
+				end
+
+				-- make call
+				h[1](...)
+			end
+		end
+
+		-- return result
+		if func_r ~= nil then
+			if func_r.n > 1 or func_r[1] ~= nil then
+				return release(func_r, unpack(func_r, 1, func_r.n))
+			end
+			release(func_r)
+		end
+	end
+
+	-- update object
+	obj[fname] = ft[2]
+
+	-- if debug_lvl >= 1 then
+	-- 	dlog("> function patch result:", obj, fname, script_path, ft[2])
+	-- end
+end
+
+function DObjectHooker:get_class_name(module, obj, check_metatable)
+	if self._class_hooks[obj] ~= nil then
+		return self._class_hooks[obj]
+	end
+
+	local name = rawget(obj, "__name")
+	if name == nil and check_metatable ~= false then
+		local mt = getmetatable(obj)
+		if mt ~= nil then
+			return self:get_class_name(module, mt, false)
+		end
+	end
+
+	return name
+end
+
+function DObjectHooker:should_log_event(hook_type, hook_id)
+	local whitelist = log_functions_whitelist
+	local list = whitelist or log_functions_blacklist
+	if not list then
+		return true
+	end
+
+	local events, event_hooks = list.event, list.event_hook
+	if whitelist and events == nil and event_hooks == nil then
+		return true
+	end
+
+	local in_list = (events ~= nil and events[hook_type])
+		or (event_hooks ~= nil and (event_hooks[tostring(hook_type) .. ":" .. tostring(hook_id)] or event_hooks[hook_id]))
+	if whitelist then
+		return in_list and true or false
+	end
+	return not in_list
+end
+
+function DObjectHooker:_should_log_calls(module, list, is_whitelist, cname, fname)
+	local in_list = false
+	if list then
+		local data
+
+		-- complete module
+		data = list.module
+		if data ~= nil then
+			in_list = data and data[module:id()]
+		end
+
+		-- function name
+		if not in_list then
+			data = list.fname
+			if data ~= nil then
+				in_list = data[fname] or data[module:id() .. ":" .. fname]
+			end
+		end
+
+		-- class name
+		if not in_list and cname then
+			data = list.class
+			if data ~= nil then
+				in_list = data[cname] or data[module:id() .. ":" .. cname]
+			end
+		end
+
+		-- class function name
+		if not in_list then
+			data = list.class_fn
+			if data ~= nil then
+				local method = (cname or "?") .. "." .. fname
+				in_list = data[method] or data[module:id() .. ":" .. method]
+			end
+		end
+	end
+
+	if is_whitelist then
+		return in_list
+	end
+	return not in_list
+end
+
+function DObjectHooker:_log_call(id, fn, module, obj, fname, ...)
+	if module:current_log_level() >= 5 then
+		local argc = select("#", ...)
+		self:log(5, id, string.format(
+			"module=%s, fn=%s, args=%i, class=%s",
+			module:id(), fname, argc, self:get_class_name(module, obj) or "?"
+		), fn)
+	end
+end
+
+function DObjectHooker:begin_require_hook(path)
+	-- if debug_lvl >= 1 then
+	-- 	dlog(">>>>>> begin require hook", path, self._object_hooks)
+	-- end
+end
+
+function DObjectHooker:end_require_hook(path)
+	-- if debug_lvl >= 1 then
+		-- dlog(">>>>> end require hook", path, self._object_hooks)
+	-- end
+end
+
+function DObjectHooker:unload_module(module)
+end
+
+
+D.ObjectHooker = DObjectHooker
+_G.DObjectHooker = DObjectHooker
+
+return DObjectHooker

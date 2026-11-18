@@ -65,6 +65,15 @@ mods/killstreak/
 └─ tools/            sfx_launch.vbs(静默启动) + sfx_server.ps1(常驻播放服务)
 ```
 
+仓库其它部分：
+
+```
+README.md                    本文件
+使用说明.txt                  给玩家的安装/设置/排错说明
+docs/                        效果截图
+patches/objecthooker/        防闪退补丁(DAHM 旧版才需要)
+```
+
 ---
 
 ## 为什么需要外部播放器
@@ -89,7 +98,7 @@ Lua  → tmp/queue.txt(追加一行)  → PowerShell 8ms 轮询 → SoundPlayer
 
 ## 已知问题
 
-- **击杀后闪退**：DAHM 早期版本的 `objecthooker.lua` 在 hook 递归超过 256 层后不会中断，导致 Lua 栈溢出。补丁见 [`docs/防闪退补丁说明.txt`](docs/防闪退补丁说明.txt)，替换 `mods/core/objecthooker.lua` 即可。DAHM 新版已修复的不需要此补丁。
+- **击杀后闪退**：DAHM 早期版本的 `objecthooker.lua` 在 hook 递归超过 256 层后不会中断，导致 Lua 栈溢出。补丁见 [`patches/objecthooker/`](patches/objecthooker/)，把里面的 `objecthooker.lua` 覆盖到游戏的 `mods/core/objecthooker.lua`，原文件已备份为 `objecthooker.lua.orig`。**DAHM 新版已修复此问题的不需要打补丁**，覆盖前先确认版本。
 - **没有声音**：先看 `logs/main.log` 里有没有 `external sound helper started`。没有说明助手进程没起来，检查杀软是否拦截了 `wscript` 启动 `powershell`。
 - **图标不显示**：确认 `logs/main.log` 里有 `texture registered from ...`。
 
